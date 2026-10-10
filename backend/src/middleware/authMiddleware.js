@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { isMongoConnected } = require('../config/db');
+const { inMemoryUsers } = require('../utils/memoryStore');
 
 const protect = async (req, res, next) => {
     let token;
@@ -10,20 +12,31 @@ const protect = async (req, res, next) => {
     ) {
         try {
             token = req.headers.authorization.split(' ')[1];
+            const secret = process.env.JWT_SECRET || 'supersecretjwtkey12345';
+            const decoded = jwt.verify(token, secret);
 
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            if (isMongoConnected()) {
+                req.user = await User.findById(decoded.id).select('-password');
+            } else {
+                const found = inMemoryUsers.find(u => u._id.toString() === decoded.id.toString());
+                if (found) {
+                    req.user = { _id: found._id, name: found.name, email: found.email };
+                }
+            }
 
-            req.user = await User.findById(decoded.id).select('-password');
+            if (!req.user) {
+                return res.status(401).json({ message: 'User not found or session expired' });
+            }
 
-            next();
+            return next();
         } catch (error) {
-            console.error(error);
-            res.status(401).json({ message: 'Not authorized, token failed' });
+            console.error('Auth error:', error.message);
+            return res.status(401).json({ message: 'Not authorized, invalid token' });
         }
     }
 
     if (!token) {
-        res.status(401).json({ message: 'Not authorized, no token' });
+        return res.status(401).json({ message: 'Not authorized, no token provided' });
     }
 };
 

@@ -7,13 +7,20 @@ const messageSchema = mongoose.Schema(
             ref: 'User',
             required: true,
         },
+        senderName: {
+            type: String,
+            default: 'Anonymous',
+        },
         content: {
             type: String,
             required: true,
+            trim: true,
         },
         roomId: {
             type: String,
-            default: 'general', // For now, single global room. Can be project ID later.
+            required: true,
+            default: 'general',
+            index: true,
         },
     },
     {
@@ -21,7 +28,6 @@ const messageSchema = mongoose.Schema(
     }
 );
 
-// Expire messages after 30 days (30 * 24 * 60 * 60 seconds)
 messageSchema.index({ createdAt: 1 }, { expireAfterSeconds: 2592000 });
 
 const Message = mongoose.model('Message', messageSchema);

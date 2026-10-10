@@ -10,6 +10,7 @@ const groupSchema = mongoose.Schema(
         description: {
             type: String,
             trim: true,
+            default: '',
         },
         host: {
             type: mongoose.Schema.Types.ObjectId,
@@ -22,10 +23,6 @@ const groupSchema = mongoose.Schema(
                 ref: 'User',
             },
         ],
-        drawingPermission: {
-            type: Boolean,
-            default: true,
-        },
     },
     {
         timestamps: true,

@@ -1,15 +1,18 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
-const http = require('http'); // Import http
-const { Server } = require('socket.io'); // Import Server from socket.io
-const connectDB = require('./config/db');
+const http = require('http');
+const { Server } = require('socket.io');
+const { connectDB, isMongoConnected } = require('./config/db');
 const authRoutes = require('./routes/authRoutes');
-const codeRoutes = require('./routes/codeRoutes'); // Import code routes
-const Message = require('./models/Message'); // Import Message model
+const groupRoutes = require('./routes/groupRoutes');
+const messageRoutes = require('./routes/messageRoutes');
+const Message = require('./models/Message');
+const { inMemoryMessages } = require('./utils/memoryStore');
 
 dotenv.config();
 
+// Attempt Database Connection
 connectDB();
 
 const app = express();
@@ -17,113 +20,128 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// --- ROUTES ---
+// Health Check
 app.get('/', (req, res) => {
-    res.send('API is running...');
+    res.json({
+        status: 'online',
+        message: 'Real-Time Chat API is operational',
+        mongoConnected: isMongoConnected(),
+    });
 });
 
+// --- API ROUTES ---
 app.use('/api/users', authRoutes);
-app.use('/api/files', require('./routes/fileRoutes'));
-app.use('/api/code', codeRoutes);
-app.use('/api/groups', require('./routes/groupRoutes'));
-app.use('/api/messages', require('./routes/messageRoutes'));
+app.use('/api/groups', groupRoutes);
+app.use('/api/messages', messageRoutes);
 
-// --- SOCKET.IO SETUP ---
-const server = http.createServer(app); // Create HTTP server
+// --- HTTP & SOCKET.IO SETUP ---
+const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: "http://localhost:5173", // Allow frontend URL
-        methods: ["GET", "POST"],
+        origin: "*", // Allow frontend connections
+        methods: ["GET", "POST", "PUT", "DELETE"],
     },
 });
 
+// Online users map: socket.id -> { userId, userName }
+const onlineUsers = new Map();
+
 io.on('connection', (socket) => {
-    console.log(`User Connected: ${socket.id}`);
-
-    socket.on('join_room', (data) => {
-        socket.join(data);
-        console.log(`User with ID: ${socket.id} joined room: ${data}`);
+    // 1. User Online Setup
+    socket.on('setup', (userData) => {
+        if (userData && (userData._id || userData.id)) {
+            const userId = (userData._id || userData.id).toString();
+            socket.userId = userId;
+            socket.userName = userData.name || 'Anonymous';
+            onlineUsers.set(socket.id, { userId, name: socket.userName });
+            
+            // Broadcast active user IDs to all clients
+            const uniqueOnlineUserIds = Array.from(new Set(Array.from(onlineUsers.values()).map(u => u.userId)));
+            io.emit('online_users', uniqueOnlineUserIds);
+        }
     });
 
-    socket.on('leave_room', (data) => {
-        socket.leave(data);
-        console.log(`User with ID: ${socket.id} left room: ${data}`);
+    // 2. Room Join & Leave
+    socket.on('join_room', (roomId) => {
+        if (!roomId) return;
+        socket.join(roomId);
     });
 
+    socket.on('leave_room', (roomId) => {
+        if (!roomId) return;
+        socket.leave(roomId);
+    });
+
+    // 3. Typing Indicators
+    socket.on('typing', ({ roomId, userName }) => {
+        if (roomId) {
+            socket.to(roomId).emit('user_typing', { roomId, userName });
+        }
+    });
+
+    socket.on('stop_typing', ({ roomId, userName }) => {
+        if (roomId) {
+            socket.to(roomId).emit('user_stop_typing', { roomId, userName });
+        }
+    });
+
+    // 4. Send Message Event
     socket.on('send_message', async (data) => {
-        // data expects: { roomId, sender (userId), content, senderName }
-        console.log('Message Received:', data);
+        // data: { roomId, sender, senderName, content }
+        if (!data || !data.content || !data.roomId) return;
 
-        // Save to DB
-        try {
-            const newMessage = await Message.create({
-                sender: data.sender, // Ensure frontend sends user ID
-                content: data.content,
-                roomId: data.roomId || 'general',
-            });
+        const timestamp = new Date().toISOString();
+        let savedMessageId = 'msg_' + Date.now();
 
-            // Emit back to room including the saved message info/timestamp
-            // We might want to populate sender details if needed, but for now simple echo
-            const messageToEmit = {
-                ...data,
-                _id: newMessage._id,
-                timestamp: newMessage.createdAt
-            };
-
-            socket.to(data.roomId).emit('receive_message', messageToEmit);
-        } catch (error) {
-            console.error('Error saving message:', error);
-        }
-    });
-
-    // --- CANVAS EVENTS ---
-    socket.on('canvas_update', (data) => {
-        // data: { roomId, element, action: 'add' | 'update' | 'delete' }
-        socket.to(data.roomId).emit('canvas_update', data);
-    });
-
-    socket.on('cursor_move', (data) => {
-        // data: { roomId, userId, userName, x, y }
-        socket.to(data.roomId).emit('cursor_move', data);
-    });
-
-    socket.on('canvas_action', (data) => {
-        // data: { roomId, action: 'undo' | 'redo' | 'clear' }
-        socket.to(data.roomId).emit('canvas_action', data);
-    });
-
-    socket.on('toggle_permission', async (data) => {
-        // data: { roomId, canDraw }
-        try {
-            // Update Group in DB
-            const Group = require('./models/Group');
-            await Group.findByIdAndUpdate(data.roomId, { drawingPermission: data.canDraw });
-
-            // Broadcast to room
-            io.in(data.roomId).emit('permission_update', { canDraw: data.canDraw });
-        } catch (error) {
-            console.error('Error updating permission:', error);
-        }
-    });
-
-    socket.on('disconnecting', () => {
-        const rooms = socket.rooms;
-        rooms.forEach((roomId) => {
-            if (roomId !== socket.id) {
-                socket.to(roomId).emit('user_left', { userId: socket.id });
-                console.log(`User ${socket.id} left room ${roomId} (disconnecting)`);
+        if (isMongoConnected()) {
+            try {
+                const created = await Message.create({
+                    roomId: data.roomId,
+                    sender: data.sender,
+                    senderName: data.senderName,
+                    content: data.content,
+                });
+                savedMessageId = created._id;
+            } catch (err) {
+                console.error('[Message Error] MongoDB save error:', err.message);
             }
-        });
+        } else {
+            // Save in memory store
+            inMemoryMessages.push({
+                _id: savedMessageId,
+                roomId: data.roomId,
+                sender: data.sender,
+                senderName: data.senderName,
+                content: data.content,
+                timestamp: timestamp
+            });
+        }
+
+        const messagePayload = {
+            _id: savedMessageId,
+            roomId: data.roomId,
+            sender: data.sender,
+            senderName: data.senderName,
+            content: data.content,
+            timestamp: timestamp,
+        };
+
+        // Broadcast to all sockets in the room except sender
+        socket.to(data.roomId).emit('receive_message', messagePayload);
     });
 
+    // 5. Disconnect Cleanup
     socket.on('disconnect', () => {
-        console.log('User Disconnected', socket.id);
+        if (onlineUsers.has(socket.id)) {
+            onlineUsers.delete(socket.id);
+            const uniqueOnlineUserIds = Array.from(new Set(Array.from(onlineUsers.values()).map(u => u.userId)));
+            io.emit('online_users', uniqueOnlineUserIds);
+        }
     });
 });
 
 const PORT = process.env.PORT || 5000;
 
-// Change app.listen to server.listen
 server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`[Chat Server] Running at http://localhost:${PORT}`);
 });
