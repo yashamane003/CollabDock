@@ -72,7 +72,12 @@ graph TD
 - **Exponential Reconnection Backoff:** Prevents Thundering Herd problems during server restarts by distributing reconnection retries with randomized jitter.
 - **Hybrid Failover Persistence:** In-memory fallback persistence keeps messaging and session lookups active even during transient database disconnects.
 
-### 4. Enterprise Security & Authorization
+### 4. Enterprise Security, Rate Limiting & Cyber Defenses
+- **Auth Rate Limiting:** Enforces strict IP-based rate limiting on `/api/users/login` and `/api/users` (**5 attempts per 5-minute window**), blocking automated brute-force and credential-stuffing attacks with standard HTTP 429 (`Too Many Requests`) headers.
+- **NoSQL Injection Neutralization:** Global `sanitizeNoSql` middleware recursively cleanses incoming query strings, body keys, and route parameters to strip `$` and `.` operators.
+- **Cross-Site Scripting (XSS) Prevention:** Server-side HTML entity escaping (`escapeHtml`) encodes all user messages and display names before database persistence or socket broadcast.
+- **HTTP Header Hardening (Helmet):** Automatic header injection for `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` (anti-Clickjacking), and suppression of the `x-powered-by` server fingerprint.
+- **DoS & Socket Buffer Shields:** Enforces strict 10 KB body parsers on REST endpoints and a 100 KB frame buffer cap with a 5 messages / 2-second rate limit on WebSocket streams.
 - **Cryptographic Password Hashing:** Salt generation with 10-round Bcrypt work factors.
 - **Stateless Session Tokens:** Signed JSON Web Tokens (JWT) verified via HTTP headers and socket handshake parameters.
 - **Scoped Room Authorization:** Strict membership verification on private rooms prevents cross-tenant data leaks.

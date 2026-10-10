@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Users, Hash, Search, Plus, X } from 'lucide-react';
 import axios from 'axios';
 
-const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [] }) => {
+const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [], unreadCounts = {} }) => {
     const [activeTab, setActiveTab] = useState('all'); // 'all', 'channels', 'groups', 'dms'
     const [users, setUsers] = useState([]);
     const [groups, setGroups] = useState([]);
@@ -210,9 +210,16 @@ const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [] }) => {
                                             <Hash className="w-3.5 h-3.5" />
                                         </div>
                                         <div className="min-w-0 flex-1">
-                                            <p className="text-xs font-semibold truncate leading-tight">
-                                                #{channel.name}
-                                            </p>
+                                            <div className="flex items-center justify-between">
+                                                <p className="text-xs font-semibold truncate leading-tight">
+                                                    #{channel.name}
+                                                </p>
+                                                {unreadCounts[channel.id] > 0 && (
+                                                    <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-xs animate-pulse">
+                                                        {unreadCounts[channel.id]}
+                                                    </span>
+                                                )}
+                                            </div>
                                             <p className="text-[10px] text-gray-400 dark:text-gray-500 truncate leading-tight">
                                                 {channel.desc}
                                             </p>
@@ -243,9 +250,11 @@ const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [] }) => {
 
                         <div className="space-y-0.5">
                             {filteredGroups.map((group) => {
-                                const groupId = group._id || group.id;
+                                const groupId = (group._id || group.id || '').toString();
                                 const active = isChatActive('group', groupId);
                                 const memberCount = Array.isArray(group.members) ? group.members.length : 1;
+                                const groupUnread = unreadCounts[groupId] || 0;
+
                                 return (
                                     <button
                                         key={groupId}
@@ -275,9 +284,16 @@ const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [] }) => {
                                                 <p className="text-xs font-semibold truncate leading-tight">
                                                     {group.name || 'Group'}
                                                 </p>
-                                                <span className="text-[10px] text-gray-400 dark:text-gray-500 font-normal">
-                                                    {memberCount} members
-                                                </span>
+                                                <div className="flex items-center space-x-1.5">
+                                                    {groupUnread > 0 && (
+                                                        <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-xs animate-pulse">
+                                                            {groupUnread}
+                                                        </span>
+                                                    )}
+                                                    <span className="text-[10px] text-gray-400 dark:text-gray-500 font-normal">
+                                                        {memberCount}
+                                                    </span>
+                                                </div>
                                             </div>
                                             <p className="text-[10px] text-gray-400 dark:text-gray-500 truncate leading-tight">
                                                 {group.description || 'Group conversation'}
@@ -321,6 +337,10 @@ const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [] }) => {
                                 const displayName = user.name || user.username || user.email?.split('@')[0] || 'User';
                                 const initial = displayName.charAt(0).toUpperCase() || '?';
 
+                                const myId = (currentUser._id || currentUser.id || '').toString();
+                                const dmRoomKey = myId && userId ? [myId, userId].sort().join('_') : '';
+                                const memberUnread = (unreadCounts[userId] || 0) + (dmRoomKey ? (unreadCounts[dmRoomKey] || 0) : 0);
+
                                 return (
                                     <button
                                         key={userId || user.email}
@@ -353,14 +373,21 @@ const ChatList = ({ activeChat, onSelectChat, onlineUserIds = [] }) => {
                                                 <p className="text-xs font-semibold truncate leading-tight">
                                                     {displayName}
                                                 </p>
-                                                <span
-                                                    className={`text-[9px] font-medium px-1.5 py-0.5 rounded-full ${isOnline
-                                                        ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60'
-                                                        : 'text-gray-400 dark:text-gray-500'
-                                                        }`}
-                                                >
-                                                    {isOnline ? 'Online' : 'Offline'}
-                                                </span>
+                                                <div className="flex items-center space-x-1.5">
+                                                    {memberUnread > 0 && (
+                                                        <span className="bg-gradient-to-r from-red-500 to-rose-600 text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded-full shadow-xs shadow-rose-500/30 animate-pulse">
+                                                            {memberUnread}
+                                                        </span>
+                                                    )}
+                                                    <span
+                                                        className={`text-[9px] font-medium px-1.5 py-0.5 rounded-full ${isOnline
+                                                            ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60'
+                                                            : 'text-gray-400 dark:text-gray-500'
+                                                            }`}
+                                                    >
+                                                        {isOnline ? 'Online' : 'Offline'}
+                                                    </span>
+                                                </div>
                                             </div>
                                             <p className="text-[10px] text-gray-400 dark:text-gray-500 truncate leading-tight">
                                                 {user.email || ''}

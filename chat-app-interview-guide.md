@@ -321,11 +321,54 @@ In an enterprise messaging system, users query messages scoped to a **single con
 > 3. **Cryptographic Verification:** The server middleware extracts the token, verifies the cryptographic signature with `jwt.verify(token, process.env.JWT_SECRET)`, extracts the decoded user ID, binds `socket.userId = decoded.id`, and calls `next()`. If the signature is invalid or expired, `next(new Error('Authentication Error'))` is called, severing the connection immediately.
 > 4. **Room-Level Authorization:** When a client emits `join_room`, the server checks whether the user is a verified member or host of that group in MongoDB before executing `socket.join(roomId)`."*
 
-#### Q6: "How do you defend the chat application against XSS, injection, and socket flooding?"
+#### Q6: "How do you defend the chat application against XSS, injection, brute-force, and socket flooding?"
 **Answer:**
-> - **Cross-Site Scripting (XSS):** React automatically escapes strings rendered in JSX (preventing `<script>` execution). We never use `dangerouslySetInnerHTML`. On the backend, inputs are trimmed, sanitized, and stored as plain text.
-> - **NoSQL Injection:** Using Mongoose with strict schema definitions prevents `$gt`/`$ne` selector injection. We ensure query parameters are explicitly cast to strings or ObjectIds.
-> - **Socket Flooding / Rate Limiting:** We implement a Token Bucket or Leaky Bucket algorithm on incoming socket events (e.g., maximum 5 messages per second per socket). If exceeded, the server ignores excess frames and emits a `rate_limit_exceeded` warning.
+> - **Brute-Force & Credential Stuffing Rate Limiting:** Enforced strict rate limiting on `/api/users/login` and `/api/users` registration using an IP-based window tracker: **maximum 5 requests per 5-minute window**. Once exceeded, the server returns standard HTTP 429 (`Too Many Requests`) with a `Retry-After: 5 minutes` header, completely throttling automated brute-force scripts.
+> - **Cross-Site Scripting (XSS):** React automatically escapes strings rendered in JSX (preventing `<script>` execution). On the server, incoming text messages are sanitized via entity escaping (`escapeHtml`), converting `<`, `>`, `&`, `"`, `'` into benign HTML entities before persistence or broadcast.
+> - **NoSQL Injection Defense:** Attackers often inject MongoDB selector objects like `{ "$gt": "" }` into authentication or search bodies to bypass credential checks. We implemented a dedicated sanitization middleware (`sanitizeNoSql`) that strips all keys prefixed with `$` or containing `.`. Additionally, strict input type validation enforces that `email` and `password` are strings below 255 characters.
+> - **HTTP Security Headers (Helmet):** Configured Helmet to set enterprise headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` (mitigating Clickjacking), and disabling the `x-powered-by` signature to prevent framework fingerprinting.
+> - **Payload Size Limits (DoS Mitigation):** Enforced a strict 10 KB limit on incoming JSON/URL-encoded bodies (`express.json({ limit: '10kb' })`) and a 100 KB limit on raw socket frame buffers (`maxHttpBufferSize: 1e5`).
+> - **Socket Flooding / Spam Throttle:** Implemented an in-memory sliding token tracker per socket connection: limits clients to a maximum of 5 messages per 2-second burst window and caps individual message length at 3,000 characters. Sockets exceeding the burst rate receive an ephemeral `error_message` event without crashing the Node.js event loop.
+
+---
+
+### Category A2: The "Same Time" Concurrency Deep-Dive
+
+#### Q7: "If User A and User B write and hit 'Send' on a message at the exact same physical millisecond, what happens end-to-end?"
+**Answer:**
+> *"This is a classic question evaluating full-stack concurrency across the network, the Node.js event loop, database storage engines, and client reconciliation.
+>
+> Here is the exact end-to-end breakdown:
+>
+> 1. **At the Network & OS Kernel Layer (TCP / NIC):**
+>    - Even if User A and User B click send simultaneously in different locations, their TCP packets travel through different network hops, routers, and latencies.
+>    - At the server's Network Interface Card (NIC), packets arrive serially at the hardware level. The OS kernel's network stack receives the Ethernet frames and places them into the socket receive buffer.
+>    - The OS multiplexer (**epoll** on Linux / **IOCP** on Windows) signals file descriptor readability to **libuv**.
+>
+> 2. **At the Node.js Event Loop Layer (Serialization & Ordering):**
+>    - Although network I/O is asynchronous, **JavaScript execution in Node.js is single-threaded**.
+>    - In the Poll phase of the event loop, libuv dequeues the events one after the other. It will pick either User A's packet first or User B's packet first (e.g., User A).
+>    - Node.js executes User A's `send_message` listener callback synchronously:
+>      - Sanitizes content, validates length.
+>      - Allocates a timestamp (`timestampA = new Date().toISOString()`).
+>      - Dispatches an asynchronous non-blocking write to MongoDB (`Message.create()`).
+>      - Immediately broadcasts `receive_message` with Message A to all room subscribers via Socket.IO.
+>    - In the very next microtask or event loop tick, Node.js processes User B's `send_message` callback:
+>      - Allocates `timestampB = new Date().toISOString()`.
+>      - Dispatches an asynchronous non-blocking write to MongoDB.
+>      - Broadcasts `receive_message` with Message B to the room subscribers.
+>
+> 3. **At the MongoDB Storage Layer (WiredTiger Concurrency):**
+>    - Both database insert operations execute concurrently via the MongoDB driver connection pool.
+>    - MongoDB's **WiredTiger engine** provides document-level concurrency and lock-free multi-version concurrency control (MVCC).
+>    - Because User A and User B are inserting two distinct documents, there is **zero lock contention or deadlocking**.
+>    - Each message is assigned a distinct 12-byte BSON `ObjectId` (which embeds an epoch timestamp, a process identifier, and an atomic counter).
+>    - Both documents are committed to the WiredTiger append-only journal. If both timestamps match down to the exact second, the auto-incrementing counter inside the BSON `_id` guarantees a strictly deterministic, monotonic sort order.
+>
+> 4. **At the Client Presentation Layer (Deterministic Sync):**
+>    - **User A's Browser:** Immediately appends Message A via an **optimistic UI update**, then receives Message B via the socket broadcast and appends it below Message A.
+>    - **User B's Browser:** Immediately appends Message B via an optimistic UI update, then receives Message A via the socket broadcast.
+>    - When either client refetches history (`GET /api/messages/:roomId`), the server query sorts by `{ createdAt: 1, _id: 1 }`. This guarantees that **both User A and User B see the exact same canonical message order** across all devices."*
 
 ---
 
